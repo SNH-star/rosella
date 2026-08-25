@@ -266,7 +266,12 @@ impl RecoverEngine {
             threads: rayon::current_num_threads(),
             // bin_unbinned: true,
             bin_unbinned: false,
-            max_retries: self.max_retries
+            max_retries: self.max_retries,
+            // No CheckM results exist yet at this point in `recover` (checkm_results is None
+            // above), so there is nothing to gate on here; max_contamination is unused since
+            // bin_contamination stays empty.
+            max_contamination: f64::MAX,
+            bin_contamination: HashMap::new(),
         };
 
         refinery.run("refined_0")?;

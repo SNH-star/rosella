@@ -624,3 +624,55 @@ impl RefineEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    fn write_temp_tsv(contents: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
+        file
+    }
+
+    #[test]
+    fn parses_checkm2_style_results_with_comment_lines() {
+        let tsv = "[some checkm2 preamble line]\n\
+                   Name\tCompleteness\tContamination\n\
+                   bin.1\t100.0\t110.48\n\
+                   bin.2\t95.0\t2.0\n";
+        let file = write_temp_tsv(tsv);
+        let path = file.path().to_str().unwrap();
+
+        let result = RefineEngine::parse_checkm_contamination(path).unwrap();
+
+        assert_eq!(result.get("bin.1"), Some(&110.48));
+        assert_eq!(result.get("bin.2"), Some(&2.0));
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn parses_checkm1_style_results_with_bin_id_column() {
+        let tsv = "Bin Id\tCompleteness\tContamination\n\
+                   bin.1\t100.0\t110.48\n";
+        let file = write_temp_tsv(tsv);
+        let path = file.path().to_str().unwrap();
+
+        let result = RefineEngine::parse_checkm_contamination(path).unwrap();
+
+        assert_eq!(result.get("bin.1"), Some(&110.48));
+    }
+
+    #[test]
+    fn errors_when_contamination_column_is_missing() {
+        let tsv = "Name\tCompleteness\n\
+                   bin.1\t100.0\n";
+        let file = write_temp_tsv(tsv);
+        let path = file.path().to_str().unwrap();
+
+        let result = RefineEngine::parse_checkm_contamination(path);
+
+        assert!(result.is_err());
+    }
+}
