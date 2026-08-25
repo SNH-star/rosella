@@ -32,7 +32,9 @@ pub struct RefineEngine {
     pub(crate) min_contig_count: usize,
     pub(crate) n_neighbours: usize,
     pub(crate) bin_unbinned: bool,
-    pub(crate) max_retries: usize
+    pub(crate) max_retries: usize,
+    pub(crate) max_contamination: f64,
+    pub(crate) bin_contamination: HashMap<String, f64>,
 }
 
 impl RefineEngine {
@@ -69,7 +71,17 @@ impl RefineEngine {
         let min_contig_count = *m.get_one::<usize>("min-contig-count").unwrap();
         let n_neighbours = *m.get_one::<usize>("n-neighbours").unwrap();
         let max_retries = *m.get_one::<usize>("max-retries").unwrap();
+        let max_contamination = *m.get_one::<f64>("max-contamination").unwrap();
 
+        // Bins whose CheckM contamination already exceeds `max_contamination` are excluded
+        // from refining entirely (see `passes_requirements`) rather than being handed to
+        // `flight refine`, since a bin that is already far too contaminated to be a plausible
+        // single genome can cause `flight refine`'s UMAP/HDBSCAN reclustering to run
+        // indefinitely on pathologically fragmented input.
+        let bin_contamination = match &checkm_results {
+            Some(checkm_path) => Self::parse_checkm_contamination(checkm_path)?,
+            None => HashMap::new(),
+        };
 
         Ok(Self {
             output_directory,
@@ -83,8 +95,53 @@ impl RefineEngine {
             min_contig_count,
             n_neighbours,
             bin_unbinned: false,
-            max_retries
+            max_retries,
+            max_contamination,
+            bin_contamination,
         })
+    }
+
+    /// Parses a CheckM1 or CheckM2 results table into a map of bin id -> contamination.
+    /// CheckM1 identifies bins under a "Bin Id" column; CheckM2 uses "Name" and also emits
+    /// leading comment lines starting with '[' which are skipped.
+    fn parse_checkm_contamination(checkm_path: &str) -> Result<HashMap<String, f64>> {
+        let mut reader = csv::ReaderBuilder::new()
+            .delimiter(b'\t')
+            .comment(Some(b'['))
+            .has_headers(true)
+            .from_path(checkm_path)?;
+
+        let headers = reader.headers()?.clone();
+        let bin_id_col = match headers.iter().position(|h| h == "Bin Id" || h == "Name") {
+            Some(idx) => idx,
+            None => bail!("Could not find a 'Bin Id' or 'Name' column in checkm results file: {}", checkm_path),
+        };
+        let contamination_col = match headers.iter().position(|h| h == "Contamination") {
+            Some(idx) => idx,
+            None => bail!("Could not find a 'Contamination' column in checkm results file: {}", checkm_path),
+        };
+
+        let mut bin_contamination = HashMap::new();
+        for record in reader.records() {
+            let record = record?;
+            let bin_id = match record.get(bin_id_col) {
+                Some(bin_id) => bin_id.to_string(),
+                None => continue,
+            };
+            let contamination_str = match record.get(contamination_col) {
+                Some(contamination_str) => contamination_str,
+                None => continue,
+            };
+            let contamination: f64 = contamination_str.parse().map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse contamination value '{}' for bin '{}' in {}: {}",
+                    contamination_str, bin_id, checkm_path, e
+                )
+            })?;
+            bin_contamination.insert(bin_id, contamination);
+        }
+
+        Ok(bin_contamination)
     }
 
 
@@ -372,7 +429,20 @@ impl RefineEngine {
             passes = false;
         }
 
+        if let Some(contamination) = self.get_bin_contamination(bin_path) {
+            if contamination > self.max_contamination {
+                passes = false;
+            }
+        }
+
         return Ok(passes);
+    }
+
+    /// Looks up a bin's contamination (from the CheckM results parsed in `new`) by matching
+    /// its filename (without extension) against the checkm table's bin id column.
+    fn get_bin_contamination(&self, bin_path: &str) -> Option<f64> {
+        let bin_id = Path::new(bin_path).file_stem()?.to_str()?.to_string();
+        self.bin_contamination.get(&bin_id).copied()
     }
 
     fn get_count_and_size_above_size(&self, bin_path: &str, min_size: usize) -> Result<(usize, usize)> {
